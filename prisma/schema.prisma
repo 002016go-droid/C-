@@ -1,0 +1,285 @@
+// ChuyenTinOJ - Prisma schema
+// Database: SQLite for MVP local; swap provider to postgresql for production.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// =====================  Enums (as strings for SQLite compat)  =====================
+// Difficulty: EASY | MEDIUM | HARD | VERY_HARD
+// SubmissionStatus: PENDING | JUDGING | ACCEPTED | WRONG_ANSWER | TIME_LIMIT_EXCEEDED |
+//                   MEMORY_LIMIT_EXCEEDED | RUNTIME_ERROR | COMPILATION_ERROR | OUTPUT_LIMIT_EXCEEDED | SYSTEM_ERROR
+// Role: USER | ADMIN
+// CommentStatus: VISIBLE | HIDDEN | REPORTED
+// ReportStatus: NEW | IN_PROGRESS | RESOLVED | REJECTED
+// ReportType: STATEMENT | SAMPLE_IO | HIDDEN_TEST | EDITORIAL | SAMPLE_CODE | DIFFICULTY | OTHER
+
+model User {
+  id              String   @id @default(cuid())
+  email           String   @unique
+  name            String?
+  passwordHash    String
+  role            String   @default("USER") // USER | ADMIN
+  isBanned        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  submissions     Submission[]
+  ratings         ProblemRating[]
+  comments        ProblemComment[]
+  reports         ProblemReport[]
+  progresses      UserProblemProgress[]
+}
+
+model Province {
+  id          String    @id @default(cuid())
+  code        String    @unique // e.g. "quang-nam"
+  name        String    // "Quảng Nam"
+  region      String?   // "Miền Trung"
+  problems    Problem[]
+}
+
+model ExamYear {
+  id        String    @id @default(cuid())
+  year      Int       @unique
+  problems  Problem[]
+}
+
+model Tag {
+  id        String        @id @default(cuid())
+  slug      String        @unique
+  name      String
+  problems  ProblemTag[]
+}
+
+model Problem {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  title           String
+  statement       String   // markdown
+  inputFormat     String
+  outputFormat    String
+  constraints     String
+  notes           String?  @default("")
+  difficulty      String   @default("EASY") // EASY | MEDIUM | HARD | VERY_HARD
+  timeLimitMs     Int      @default(1000)
+  memoryLimitMb   Int      @default(256)
+  outputLimitKb   Int      @default(10240)
+  totalPoints     Int      @default(100)
+  fileIoEnabled   Boolean  @default(false)
+  fileInputName   String?
+  fileOutputName  String?
+  showEditorial   Boolean  @default(true)
+  isPublished     Boolean  @default(true)
+  examYearId      String?
+  provinceId      String?
+  source          String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  province        Province?  @relation(fields: [provinceId], references: [id])
+  examYear        ExamYear?  @relation(fields: [examYearId], references: [id])
+  tags            ProblemTag[]
+  subtasks        Subtask[]
+  testCases       TestCase[]
+  editorial       Editorial?
+  submissions     Submission[]
+  ratings         ProblemRating[]
+  comments        ProblemComment[]
+  reports         ProblemReport[]
+  contestProblems ContestProblem[]
+  progresses      UserProblemProgress[]
+}
+
+model ProblemTag {
+  problemId String
+  tagId     String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  @@id([problemId, tagId])
+}
+
+model Subtask {
+  id          String   @id @default(cuid())
+  problemId   String
+  name        String
+  points      Int
+  order       Int      @default(0)
+  constraints String?  @default("")
+  problem     Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  testCases   TestCase[]
+  results     SubmissionResult[]
+}
+
+model TestCase {
+  id              String   @id @default(cuid())
+  problemId       String
+  subtaskId       String?
+  order           Int      @default(0)
+  isSample        Boolean  @default(false)
+  input           String
+  expectedOutput  String
+  timeLimitMs     Int?
+  memoryLimitMb   Int?
+  problem         Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  subtask         Subtask? @relation(fields: [subtaskId], references: [id], onDelete: SetNull)
+  results         SubmissionResult[]
+}
+
+model Editorial {
+  id              String   @id @default(cuid())
+  problemId       String   @unique
+  idea            String
+  observations    String
+  approach        String
+  algorithmAnalysis String
+  timeComplexity  String
+  memoryComplexity String
+  cppCode         String
+  codeExplanation String
+  commonMistakes  String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  problem         Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+}
+
+model Submission {
+  id              String   @id @default(cuid())
+  userId          String
+  problemId       String
+  language        String   @default("cpp17") // cpp17 | python (future)
+  sourceCode      String
+  status          String   @default("PENDING")
+  verdict         String?
+  totalScore      Int      @default(0)
+  maxScore        Int      @default(100)
+  compileLog      String?  @default("")
+  judgeMessage    String?  @default("")
+  runtimeMs       Int?
+  memoryKb        Int?
+  contestId       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem         Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  contest         Contest? @relation(fields: [contestId], references: [id], onDelete: SetNull)
+  results         SubmissionResult[]
+
+  @@index([userId])
+  @@index([problemId])
+  @@index([status])
+}
+
+model SubmissionResult {
+  id           String   @id @default(cuid())
+  submissionId String
+  subtaskId    String?
+  testCaseId   String?
+  verdict      String   // ACCEPTED | WRONG_ANSWER | TLE | MLE | RE | OLE | SKIPPED
+  runtimeMs    Int?
+  memoryKb     Int?
+  points       Int      @default(0)
+  message      String?  @default("")
+  isSubtaskAggregate Boolean @default(false)
+
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  subtask      Subtask?   @relation(fields: [subtaskId], references: [id], onDelete: SetNull)
+  testCase     TestCase?  @relation(fields: [testCaseId], references: [id], onDelete: SetNull)
+
+  @@index([submissionId])
+}
+
+model ProblemRating {
+  id        String   @id @default(cuid())
+  userId    String
+  problemId String
+  stars     Int      // 1..5
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem   Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  @@unique([userId, problemId])
+}
+
+model ProblemComment {
+  id        String   @id @default(cuid())
+  userId    String
+  problemId String
+  body      String
+  status    String   @default("VISIBLE") // VISIBLE | HIDDEN | REPORTED
+  parentId  String?
+  reportCount Int    @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem   Problem        @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  parent    ProblemComment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies   ProblemComment[] @relation("CommentReplies")
+}
+
+model ProblemReport {
+  id           String   @id @default(cuid())
+  userId       String
+  problemId    String
+  type         String   // STATEMENT | SAMPLE_IO | HIDDEN_TEST | EDITORIAL | SAMPLE_CODE | DIFFICULTY | OTHER
+  description  String
+  status       String   @default("NEW") // NEW | IN_PROGRESS | RESOLVED | REJECTED
+  adminNote    String?  @default("")
+  createdAt    DateTime @default(now())
+  resolvedAt   DateTime?
+
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem      Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+}
+
+model Contest {
+  id            String   @id @default(cuid())
+  code          String   @unique
+  title         String
+  description   String?  @default("")
+  startsAt      DateTime?
+  endsAt        DateTime?
+  durationMin   Int      @default(150)
+  totalPoints   Int      @default(10) // hiển thị 10 điểm
+  isPublished   Boolean  @default(true)
+  hasRanking    Boolean  @default(true)
+  provinceId    String?
+  examYear      Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  problems      ContestProblem[]
+  submissions   Submission[]
+}
+
+model ContestProblem {
+  contestId String
+  problemId String
+  order     Int     @default(0)
+  points    Float   @default(0) // ví dụ 3.0 / 3.0 / 2.0 / 2.0
+  contest   Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  @@id([contestId, problemId])
+}
+
+model UserProblemProgress {
+  id            String   @id @default(cuid())
+  userId        String
+  problemId     String
+  bestScore     Int      @default(0)
+  attempts      Int      @default(0)
+  solved        Boolean  @default(false)
+  lastTriedAt   DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem       Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  @@unique([userId, problemId])
+  @@index([userId])
+}
