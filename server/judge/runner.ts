@@ -151,40 +151,45 @@ export async function judgeSubmission(submissionId: string): Promise<void> {
     });
 
     // Update user progress
-    await prisma.userProblemProgress.upsert({
-      where: { userId_problemId: { userId: submission.userId, problemId: submission.problemId } },
-      update: {
-        attempts: { increment: 1 },
-        bestScore: { set: undefined },
-        lastTriedAt: new Date()
-      },
-      create: {
-        userId: submission.userId,
-        problemId: submission.problemId,
-        attempts: 1,
-        bestScore: totalScore,
-        solved: finalStatus === 'ACCEPTED',
-        lastTriedAt: new Date()
-      }
-    });
-    // refresh bestScore/solved after increment (cannot do in single upsert with conditional)
-    const prog = await prisma.userProblemProgress.findUnique({
+    const existing = await prisma.userProblemProgress.findUnique({
       where: { userId_problemId: { userId: submission.userId, problemId: submission.problemId } }
     });
-    if (prog) {
+    if (existing) {
       await prisma.userProblemProgress.update({
-        where: { id: prog.id },
+        where: { id: existing.id },
         data: {
-          bestScore: Math.max(prog.bestScore, totalScore),
-          solved: prog.solved || finalStatus === 'ACCEPTED'
+          attempts: existing.attempts + 1,
+          bestScore: Math.max(existing.bestScore, totalScore),
+          solved: existing.solved || finalStatus === 'ACCEPTED',
+          lastTriedAt: new Date()
+        }
+      });
+    } else {
+      await prisma.userProblemProgress.create({
+        data: {
+          userId: submission.userId,
+          problemId: submission.problemId,
+          attempts: 1,
+          bestScore: totalScore,
+          solved: finalStatus === 'ACCEPTED',
+          lastTriedAt: new Date()
         }
       });
     }
   } catch (err) {
-    await prisma.submission.update({
-      where: { id: submissionId },
-      data: { status: 'SYSTEM_ERROR', verdict: 'SYSTEM_ERROR', judgeMessage: String(err).slice(0, 1000) }
-    });
+    console.error('[judge] error judging submission', submissionId, err);
+    const cur = await prisma.submission.findUnique({ where: { id: submissionId } });
+    if (!cur || cur.status === 'JUDGING' || cur.status === 'PENDING') {
+      await prisma.submission.update({
+        where: { id: submissionId },
+        data: { status: 'SYSTEM_ERROR', verdict: 'SYSTEM_ERROR', judgeMessage: String(err).slice(0, 1000) }
+      });
+    } else {
+      await prisma.submission.update({
+        where: { id: submissionId },
+        data: { judgeMessage: ((cur.judgeMessage || '') + ' | post-judge error: ' + String(err)).slice(0, 1000) }
+      });
+    }
   } finally {
     if (compile.cleanup) await compile.cleanup();
   }
