@@ -32,3 +32,8 @@ prisma/dev.db-journal
 # judge
 /tmp/judge-*
 judge-runtime/
+
+# session-local test scripts (not part of production code)
+scripts-tmp-*.ts
+test-plan.md
+test-report.md

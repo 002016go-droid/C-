@@ -42,7 +42,7 @@ DATABASE_URL="file:./dev.db"
 NEXTAUTH_URL="http://localhost:3000"
 NEXTAUTH_SECRET="please-change-this-to-a-long-random-string"
 
-JUDGE_MODE="local"              # mock | local | docker (mỗi mode tương ứng một executor)
+JUDGE_MODE="local"              # mock | local | sandboxed | docker (chọn executor; "sandboxed" cần bubblewrap+prlimit, "docker" reserved)
 JUDGE_CPP_COMPILER="g++"
 JUDGE_TIMEOUT_MS="5000"
 ```
@@ -184,7 +184,7 @@ Mỗi bài có 2-3 subtask (tổng điểm = 100) và 30 test case (3 sample + 2
 - Test ẩn không trả về frontend (chỉ trả input/output của test mẫu).
 - File I/O (Themis style) có thể cấu hình mỗi bài (`fileIoEnabled`, `fileInputName`, `fileOutputName`) — MVP vẫn dùng stdin/stdout, trường này dùng cho hiển thị.
 - Source code submission được giới hạn 200 KB; output mỗi test giới hạn theo `outputLimitKb` (mặc định 10 MB).
-- Local executor hiện chưa chạy trong container — **production phải dùng Docker sandbox** (xem Roadmap).
+- Local executor (`JUDGE_MODE=local`) chưa cách ly hệ thống. Để host preview/production có submission từ người dùng không tin tưởng, **dùng `JUDGE_MODE=sandboxed`** (bubblewrap + prlimit) — chặn `/etc`, `/home`, network, giới hạn memory/CPU. `JUDGE_MODE=docker` reserved cho bản containerized đầy đủ.
 
 ## Deploy
 
@@ -195,8 +195,8 @@ Mỗi bài có 2-3 subtask (tổng điểm = 100) và 30 test case (3 sample + 2
 
 ## Giới hạn MVP
 
-- Local C++ executor chạy ngay trên host (không phải Docker sandbox). Không phù hợp môi trường production công khai — chỉ dùng nội bộ.
-- Đo memory chưa chính xác (chưa tích hợp `cgroups`/`getrusage`).
+- Hai chế độ executor: `local` (chạy g++ thẳng trên host — chỉ dev nội bộ) và `sandboxed` (bubblewrap + prlimit — phù hợp shared preview). Tất cả đều **chưa phải Docker** (xem Roadmap).
+- Đo memory chính xác chỉ ở `sandboxed` (qua `prlimit --as`); ở `local` chưa tích hợp `cgroups`/`getrusage`.
 - Chưa hỗ trợ ngôn ngữ ngoài C++17 (đã có cấu trúc để mở rộng Python/Pascal).
 - Bộ filter trang bài tập đang phía client (đủ với 30 bài; mở rộng quy mô cần phân trang server-side).
 - Trang admin tập trung vào quản lý chính; UI form chi tiết subtask/test tách rời nên với khối lượng test lớn nên dùng API trực tiếp hoặc script seed.

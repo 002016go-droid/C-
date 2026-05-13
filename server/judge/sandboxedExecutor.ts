@@ -1,10 +1,18 @@
-// Local C++ executor for MVP. Runs g++ on the host machine. The architecture
-// is identical to a Docker-based executor: compile + run with timeouts/limits.
+// Sandboxed C++ executor for MVP / shared previews.
 //
-// SECURITY NOTE: This local executor is for development/MVP only. For
-// production, swap with a Docker sandbox that disables network, restricts
-// CPU/memory/output, and isolates the filesystem. Drop a new module implementing
-// JudgeExecutor and pick it in `server/judge/index.ts` via JUDGE_MODE env.
+// Runs untrusted code under bubblewrap (bwrap) + prlimit:
+//   - bwrap: new mount/PID/IPC/UTS namespaces, --unshare-net (no network),
+//     /etc not bound (so /etc/passwd, /etc/shadow, etc. aren't visible),
+//     tmpfs for /tmp, only the compiled artifact bind-mounted at /sandbox/sol.
+//   - prlimit: address-space (memory) and CPU-time hard limits.
+//
+// Not a substitute for a real production judge (e.g., Docker/Firecracker with
+// seccomp filters + cgroup memory.high), but adequate to safely host a public
+// preview where untrusted code is executed.
+//
+// SECURITY NOTE: Requires bubblewrap to be installed on the host
+// (`apt-get install bubblewrap`). The Vercel/serverless deployment path cannot
+// run this executor — only persistent VMs with `bwrap` available can.
 
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
@@ -14,6 +22,8 @@ import { randomUUID } from 'crypto';
 import type { CompileResult, JudgeExecutor, RunInput, RunResult } from './types';
 
 const COMPILER = process.env.JUDGE_CPP_COMPILER || 'g++';
+const BWRAP = process.env.JUDGE_BWRAP_BIN || 'bwrap';
+const PRLIMIT = process.env.JUDGE_PRLIMIT_BIN || 'prlimit';
 
 async function runProcess(
   cmd: string,
@@ -46,7 +56,6 @@ async function runProcess(
         child.kill('SIGKILL');
       }, opts.timeoutMs);
     }
-    // Ignore EPIPE — happens when the child exits before reading all of stdin.
     child.stdin.on('error', () => {});
     if (opts.stdin != null) {
       child.stdin.end(opts.stdin);
@@ -64,11 +73,11 @@ async function runProcess(
   });
 }
 
-class LocalCppExecutor implements JudgeExecutor {
-  name = 'local-cpp';
+class SandboxedCppExecutor implements JudgeExecutor {
+  name = 'sandboxed-cpp';
 
   async compileCpp(source: string): Promise<CompileResult> {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ctoj-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ctoj-sb-'));
     const src = path.join(dir, 'sol.cpp');
     const bin = path.join(dir, 'sol');
     await fs.writeFile(src, source, 'utf8');
@@ -78,7 +87,6 @@ class LocalCppExecutor implements JudgeExecutor {
       { timeoutMs: 15000 }
     );
     if (result.code !== 0) {
-      // Try without static linking (some systems lack static libstdc++)
       const fallback = await runProcess(
         COMPILER,
         ['-O2', '-std=c++17', '-o', bin, src],
@@ -102,8 +110,40 @@ class LocalCppExecutor implements JudgeExecutor {
 
   async run(input: RunInput): Promise<RunResult> {
     const id = randomUUID();
+    const memBytes = Math.max(64, input.memoryLimitMb) * 1024 * 1024;
+    // prlimit --as enforces an address-space ceiling; --cpu adds a CPU-time
+    // cap (whole seconds) just slightly above the wall-clock TLE so the
+    // process can't pin a core indefinitely.
+    const cpuSec = Math.max(2, Math.ceil(input.timeLimitMs / 1000) + 1);
+    const bwrapArgs: string[] = [
+      `--as=${memBytes}`,
+      `--cpu=${cpuSec}`,
+      '--',
+      BWRAP,
+      // Minimal read-only system layout — NO /etc bind so /etc/passwd etc.
+      // are not visible from inside the sandbox.
+      '--ro-bind', '/usr', '/usr',
+      '--ro-bind', '/lib', '/lib',
+      '--ro-bind', '/lib64', '/lib64',
+      '--ro-bind', '/bin', '/bin',
+      '--ro-bind', '/etc/ld.so.cache', '/etc/ld.so.cache',
+      '--proc', '/proc',
+      '--dev', '/dev',
+      '--tmpfs', '/tmp',
+      '--bind', input.artifactPath, '/sandbox/sol',
+      '--chdir', '/sandbox',
+      '--unshare-net',
+      '--unshare-pid',
+      '--unshare-user',
+      '--unshare-uts',
+      '--unshare-ipc',
+      '--die-with-parent',
+      '--new-session',
+      '--hostname', 'sandbox',
+      '/sandbox/sol'
+    ];
     const sandboxEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin', LANG: 'C', TMPDIR: '/tmp', NODE_ENV: process.env.NODE_ENV };
-    const result = await runProcess(input.artifactPath, [], {
+    const result = await runProcess(PRLIMIT, bwrapArgs, {
       stdin: input.input,
       timeoutMs: input.timeLimitMs,
       outputLimitBytes: input.outputLimitKb * 1024,
@@ -115,9 +155,14 @@ class LocalCppExecutor implements JudgeExecutor {
     if (result.timedOut) {
       return { verdict: 'TIME_LIMIT_EXCEEDED', stdout: result.stdout, stderr: result.stderr, runtimeMs: result.elapsedMs };
     }
+    // prlimit kills with SIGKILL on CPU exceeded; bad_alloc on memory cap
+    // surfaces as a non-zero exit. Distinguish MLE heuristically.
     if (result.code !== 0) {
+      const looksLikeMle =
+        /std::bad_alloc|out of memory|virtual memory exhausted|cannot allocate/i.test(result.stderr) ||
+        result.signal === 'SIGKILL' && result.elapsedMs < input.timeLimitMs * 0.9;
       return {
-        verdict: 'RUNTIME_ERROR',
+        verdict: looksLikeMle ? 'MEMORY_LIMIT_EXCEEDED' : 'RUNTIME_ERROR',
         stdout: result.stdout,
         stderr: result.stderr,
         runtimeMs: result.elapsedMs,
@@ -128,4 +173,4 @@ class LocalCppExecutor implements JudgeExecutor {
   }
 }
 
-export const cppExecutor: JudgeExecutor = new LocalCppExecutor();
+export const sandboxedCppExecutor: JudgeExecutor = new SandboxedCppExecutor();
